@@ -11,7 +11,6 @@ build/
 .cache/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -20,3 +19,5 @@ build/
 # Debug
 *.dwo
 *.pdb
+config.bat
+node_modules

@@ -124,6 +124,9 @@ void main() {
     bool hasMask = (useMask == 1);
     if (hasMask) {
         vec2 maskUV = uv * maskUVScale + maskUVOffset;
+        if (maskUV.x < 0.0 || maskUV.x > 1.0 || maskUV.y < 0.0 || maskUV.y > 1.0)
+            discard;
+
         surfacePixel = texture(maskTex, clamp(maskUV, 0.001, 0.999));
 
         if (maskMode == 1) {

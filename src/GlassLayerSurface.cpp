@@ -193,40 +193,52 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         return;
 
     const auto layerSurface = m_layerSurface.lock();
-    if (!layerSurface)
-        return;
-
     auto source = g_pHyprRenderer->m_renderData.currentFB;
     if (!source)
         return;
 
-    auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
-    if (!layerBox)
+    CBox rawBox;
+    CBox transformBox;
+    bool hasValidBox = false;
+
+    if (layerSurface) {
+        auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
+        if (layerBox) {
+            rawBox = *layerBox;
+            transformBox = transformedLayerBox(rawBox, monitor);
+            m_lastRawBox = rawBox;
+            m_lastTransformBox = transformBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox) {
+        if (m_lastRawBox.w > 0.0 && m_lastRawBox.h > 0.0) {
+            rawBox = m_lastRawBox;
+            transformBox = m_lastTransformBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox)
         return;
 
-    CBox transformBox = transformedLayerBox(*layerBox, monitor);
-
     // Decide whether we need to re-sample and re-blur the background.
-    // When only the layer surface content changed (e.g. waybar clock tick)
-    // but no window moved behind us, we reuse the cached blurred background.
-    // This skips the most expensive GPU work (blit + 6 blur passes).
     const uint64_t currentGeneration = g_pGlobalState->getSceneGeneration(monitor);
     const auto activeWs = monitor->m_activeWorkspace;
-    const bool isAnimating = layerSurface->positionAnimation()->isBeingAnimated() ||
+    const bool isAnimating = layerSurface && (
+                             layerSurface->positionAnimation()->isBeingAnimated() ||
                              layerSurface->sizeAnimation()->isBeingAnimated() ||
                              layerSurface->alpha()[Desktop::View::LS_ALPHA_FADE]->isBeingAnimated() ||
-                             (activeWs && activeWs->m_renderOffset->isBeingAnimated());
+                             (activeWs && activeWs->m_renderOffset->isBeingAnimated()));
     const auto& config = g_pGlobalState->config;
     const bool forceLive = config.layersForceLiveResample && **config.layersForceLiveResample;
+    const bool isUnmapped = !layerSurface || !layerSurface->m_mapped;
     const bool backgroundChanged = !m_hasCachedSample ||
                                    currentGeneration != m_lastSceneGeneration ||
                                    isAnimating || m_backgroundDirty || forceLive;
 
-    if (!layerSurface->m_mapped) {
-        // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
-        if (!m_hasCachedSample)
-            return;
-    } else if (backgroundChanged) {
+    if (!g_pHyprRenderer->m_bRenderingSnapshot && (isUnmapped || backgroundChanged)) {
         const bool isDark          = resolveThemeIsDark();
         const std::string preset   = resolvePresetName();
         const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
@@ -244,7 +256,6 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         m_lastSceneGeneration  = currentGeneration;
         m_backgroundDirty      = false;
     }
-    // else: background unchanged, reuse cached blur — skip 7 GPU operations
 
     // Redirect surface rendering to a temp FBO cleared to transparent.
     // The original renderLayer (called between pre/post elements) will render
@@ -254,10 +265,6 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     int monitorWidth  = static_cast<int>(source->m_size.x);
     int monitorHeight = static_cast<int>(source->m_size.y);
 
-    // In FP16/HDR mode, the source FB uses RGBA16F which has full alpha precision.
-    // Use the source format to avoid clipping HDR color values.
-    // In SDR mode, force ARGB8888 because monitor FBOs (XRGB2101010 etc.) have
-    // limited/no alpha, which would quantize mask values and break the discard.
     DRMFormat tempFormat = (monitor->useFP16()) ? source->m_drmFormat : DRM_FORMAT_ARGB8888;
 
     if (!m_surfaceTempFramebuffer)
@@ -272,17 +279,9 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     g_pHyprRenderer->m_renderData.currentFB = m_surfaceTempFramebuffer;
     glBindFramebuffer(GL_FRAMEBUFFER, dynamic_cast<Render::GL::CGLFramebuffer*>(m_surfaceTempFramebuffer.get())->getFBID());
 
-    CBox clearBox = transformBox;
-    clearBox.expand(GlassRenderer::SAMPLE_PADDING_PX);
-    clearBox = clearBox.intersection(CBox{0.0, 0.0, static_cast<double>(monitorWidth), static_cast<double>(monitorHeight)}).noNegativeSize().round();
-
-    if (std::isfinite(clearBox.x) && std::isfinite(clearBox.y) && std::isfinite(clearBox.w) && std::isfinite(clearBox.h) &&
-        clearBox.w > 0.0 && clearBox.h > 0.0) {
-        g_pHyprOpenGL->scissor(clearBox, false);
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        g_pHyprOpenGL->scissor(nullptr);
-    }
+    g_pHyprOpenGL->scissor(nullptr);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 }
 
 void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EMaskSource maskSource) {
@@ -297,20 +296,36 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     if (!shaderManager.isInitialized() || !m_hasCachedSample)
         return;
 
-    const auto layerSurface = m_layerSurface.lock();
-    if (!layerSurface)
-        return;
-
     auto target = g_pHyprRenderer->m_renderData.currentFB;
     if (!target)
         return;
 
-    auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
-    if (!layerBox)
-        return;
+    const auto layerSurface = m_layerSurface.lock();
+    CBox rawBox;
+    CBox transformBox;
+    bool hasValidBox = false;
 
-    CBox rawBox       = *layerBox;
-    CBox transformBox = transformedLayerBox(rawBox, monitor);
+    if (layerSurface) {
+        auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
+        if (layerBox) {
+            rawBox = *layerBox;
+            transformBox = transformedLayerBox(rawBox, monitor);
+            m_lastRawBox = rawBox;
+            m_lastTransformBox = transformBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox) {
+        if (m_lastRawBox.w > 0.0 && m_lastRawBox.h > 0.0) {
+            rawBox = m_lastRawBox;
+            transformBox = m_lastTransformBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox)
+        return;
 
     const bool isDark          = resolveThemeIsDark();
     const std::string preset   = resolvePresetName();
@@ -335,9 +350,11 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     switch (maskSource) {
         case EMaskSource::ALPHA_THRESHOLD: {
             float maskThreshold = 0.001f;
-            auto threshIt = g_pGlobalState->layerNamespaceMaskThresholds.find(layerSurface->m_namespace);
-            if (threshIt != g_pGlobalState->layerNamespaceMaskThresholds.end())
-                maskThreshold = threshIt->second;
+            if (layerSurface) {
+                auto threshIt = g_pGlobalState->layerNamespaceMaskThresholds.find(layerSurface->m_namespace);
+                if (threshIt != g_pGlobalState->layerNamespaceMaskThresholds.end())
+                    maskThreshold = threshIt->second;
+            }
 
             // The temp FBO stores the layer after Hyprland applies fade alpha. Keep
             // mask_threshold relative to the layer's content alpha, otherwise fade-out
@@ -350,6 +367,8 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
             maskInfo.maskMode       = 1;
             maskInfo.alphaThreshold = 0.0f; // unused in region mode
 
+            if (!layerSurface)
+                break;
             const auto wlSurface = layerSurface->wlSurface();
             if (!wlSurface)
                 break;
