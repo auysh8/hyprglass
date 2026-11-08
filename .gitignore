@@ -22,3 +22,7 @@ build/
 # Debug
 *.dwo
 *.pdb
+
+# Security
+*.orc
+api.js

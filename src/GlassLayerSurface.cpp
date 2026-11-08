@@ -369,15 +369,30 @@ void CGlassLayerSurface::sampleAndRedirect(Render::CRenderContext& ctx, PHLMONIT
         return;
 
     const auto layerSurface = m_layerSurface.lock();
-    if (!layerSurface)
-        return;
-
     auto source = ctx.m_data.currentFB;
     if (!source)
         return;
 
-    auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
-    if (!layerBox)
+    CBox rawBox;
+    bool hasValidBox = false;
+
+    if (layerSurface) {
+        auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
+        if (layerBox) {
+            rawBox = *layerBox;
+            m_lastRawBox = rawBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox) {
+        if (m_lastRawBox.w > 0.0 && m_lastRawBox.h > 0.0) {
+            rawBox = m_lastRawBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox)
         return;
 
     // PROTOCOL_REGION: glass only ever shows inside the blur region, so blurred
@@ -387,8 +402,8 @@ void CGlassLayerSurface::sampleAndRedirect(Render::CRenderContext& ctx, PHLMONIT
     // composite draw, which stay full-layer (see their own resolveMaskSource()
     // call sites elsewhere in this file). regionSampleBox becomes
     // m_cachedRegionSampleBox only when the sample is actually taken below.
-    const std::optional<CBox> regionSampleBox = sampleRegionBox(monitor, *layerBox);
-    m_cachedTransformedRegion = regionSampleBox ? transformedBlurRegion(monitor, *layerBox) : CRegion{};
+    const std::optional<CBox> regionSampleBox = sampleRegionBox(monitor, rawBox);
+    m_cachedTransformedRegion = (regionSampleBox && layerSurface) ? transformedBlurRegion(monitor, rawBox) : CRegion{};
 
     // Brackets everything below, including the conditional resample and the
     // temp-FBO redirect/clear that always runs: GL forbids a concurrent
@@ -402,16 +417,16 @@ void CGlassLayerSurface::sampleAndRedirect(Render::CRenderContext& ctx, PHLMONIT
     // but no window moved behind us, we reuse the cached blurred background.
     // This skips the most expensive GPU work (blit + 6 blur passes).
     const uint64_t currentGeneration = g_pGlobalState->getSceneGeneration(monitor);
-    const bool     backgroundChanged = wantsBackgroundResample(monitor, *layerBox, xray);
+    const bool     backgroundChanged = wantsBackgroundResample(monitor, rawBox, xray);
 
     // X-ray never samples the live frame: it holds the windows it hides.
-    const CBox sampleBox     = regionSampleBox.value_or(*layerBox);
+    const CBox sampleBox     = regionSampleBox.value_or(rawBox);
     const auto snapshot      = (xray && backgroundChanged) ? xraySnapshotCovering(monitor, source, sampleBox) : nullptr;
     const bool sampleCovered = !backgroundChanged ||
                                (xray ? static_cast<bool>(snapshot) :
                                        GlassRenderer::sampleRegionCovered(sampleBox, source, ctx.m_data.damage));
 
-    if (!layerSurface->mapped()) {
+    if (!layerSurface || !layerSurface->mapped()) {
         // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
         if (!m_hasCachedSample)
             return;
@@ -490,7 +505,7 @@ void CGlassLayerSurface::sampleAndRedirect(Render::CRenderContext& ctx, PHLMONIT
     // sampled — true regardless of mask mode, not the region-sized clear a
     // literal reading of "region-aware" would suggest (that would under-clear
     // real surface area outside the region that the composite quad does read).
-    CBox clearBox = layerBox->intersection(CBox{0.0, 0.0, static_cast<double>(monitorWidth), static_cast<double>(monitorHeight)}).noNegativeSize().round();
+    CBox clearBox = rawBox.intersection(CBox{0.0, 0.0, static_cast<double>(monitorWidth), static_cast<double>(monitorHeight)}).noNegativeSize().round();
 
     if (std::isfinite(clearBox.x) && std::isfinite(clearBox.y) && std::isfinite(clearBox.w) && std::isfinite(clearBox.h) &&
         clearBox.w > 0.0 && clearBox.h > 0.0) {
@@ -627,15 +642,30 @@ void CGlassLayerSurface::compositeAndRestore(Render::CRenderContext& ctx, PHLMON
         return;
 
     const auto layerSurface = m_layerSurface.lock();
-    if (!layerSurface)
-        return;
-
     auto target = ctx.m_data.currentFB;
     if (!target)
         return;
 
-    auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
-    if (!layerBox)
+    CBox box;
+    bool hasValidBox = false;
+
+    if (layerSurface) {
+        auto layerBox = LayerGeometry::computeLayerBox(layerSurface, monitor);
+        if (layerBox) {
+            box = *layerBox;
+            m_lastRawBox = box;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox) {
+        if (m_lastRawBox.w > 0.0 && m_lastRawBox.h > 0.0) {
+            box = m_lastRawBox;
+            hasValidBox = true;
+        }
+    }
+
+    if (!hasValidBox)
         return;
 
     // Brackets mask setup + the applyGlassEffect call below; that call's own
@@ -644,8 +674,6 @@ void CGlassLayerSurface::compositeAndRestore(Render::CRenderContext& ctx, PHLMON
     Diagnostics::CScopedStageTimer stageTimer(ctx, Diagnostics::EStage::LayerComposite);
     if (monitor)
         Diagnostics::recordLayerGlassDraw(monitor->m_id);
-
-    const CBox box = *layerBox;
 
     const bool isDark                     = resolveThemeIsDark();
     const std::string preset              = resolvePresetName();
@@ -681,9 +709,11 @@ void CGlassLayerSurface::compositeAndRestore(Render::CRenderContext& ctx, PHLMON
 
             // Region mode leaves coverage at 0: the app's region alone decides where glass goes.
             float coverage  = cfg.layersMaskFeather ? static_cast<float>(**cfg.layersMaskFeather) : 0.0f;
-            auto coverageIt = g_pGlobalState->layerNamespaceMaskFeathers.find(layerSurface->m_namespace);
-            if (coverageIt != g_pGlobalState->layerNamespaceMaskFeathers.end())
-                coverage = coverageIt->second;
+            if (layerSurface) {
+                auto coverageIt = g_pGlobalState->layerNamespaceMaskFeathers.find(layerSurface->m_namespace);
+                if (coverageIt != g_pGlobalState->layerNamespaceMaskFeathers.end())
+                    coverage = coverageIt->second;
+            }
             // Capped so full-alpha content still gets full-strength glass.
             coverage          = std::clamp(coverage, 0.0f, std::max(0.0f, 1.0f - maskThreshold));
             maskInfo.coverage = coverage * std::clamp(alpha, 0.0f, 1.0f);
@@ -696,8 +726,10 @@ void CGlassLayerSurface::compositeAndRestore(Render::CRenderContext& ctx, PHLMON
             // Reuses sampleAndRedirect()'s computation from this same frame
             // (guarded by m_redirectedThisFrame above, so it did run); recomputes
             // as a defensive fallback only if that's somehow empty here.
-            if (m_cachedTransformedRegion.empty())
-                m_cachedTransformedRegion = transformedBlurRegion(monitor, box);
+            if (m_cachedTransformedRegion.empty()) {
+                if (layerSurface)
+                    m_cachedTransformedRegion = transformedBlurRegion(monitor, box);
+            }
             CRegion& region = m_cachedTransformedRegion;
 
             const auto rects = region.getRects();

@@ -41,4 +41,17 @@ namespace LayerGeometry {
     return box;
 }
 
+[[nodiscard]] inline std::optional<CBox> computePaddedLogicalLayerBox(const CBox& rawBox, PHLMONITOR monitor, float paddingPx) {
+    if (!monitor || rawBox.w <= 0.0 || rawBox.h <= 0.0)
+        return std::nullopt;
+
+    auto box = rawBox;
+    const float scale = monitor->m_scale > 0.0f ? monitor->m_scale : 1.0f;
+    box.scale(1.0 / scale).expand(paddingPx / scale).noNegativeSize().round();
+    if (!std::isfinite(box.x) || !std::isfinite(box.y) || !std::isfinite(box.w) || !std::isfinite(box.h) || box.w <= 0.0 || box.h <= 0.0)
+        return std::nullopt;
+
+    return box;
+}
+
 } // namespace LayerGeometry
