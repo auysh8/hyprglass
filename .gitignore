@@ -13,7 +13,6 @@ build/
 .cache/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -22,3 +21,9 @@ build/
 # Debug
 *.dwo
 *.pdb
+
+# Security
+*.orc
+api.js
+config.bat
+node_modules

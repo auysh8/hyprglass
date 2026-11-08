@@ -68,6 +68,11 @@ class CGlassLayerSurface {
     [[nodiscard]] EMaskSource resolveMaskSource() const;
 
     [[nodiscard]] PHLLS getLayerSurface() const;
+    [[nodiscard]] Vector2D getLastPosition() const { return m_lastPosition; }
+    [[nodiscard]] Vector2D getLastSize() const { return m_lastSize; }
+    [[nodiscard]] CBox getLastRawBox() const { return m_lastRawBox; }
+    [[nodiscard]] CBox getLastTransformBox() const { return m_lastTransformBox; }
+    [[nodiscard]] bool hasCachedSample() const { return m_hasCachedSample; }
 
     // PROTOCOL_REGION only: the blur region's bounding box in the same
     // monitor-pixel space as layerBox/regionRects (matches transformedBlurRegion()
@@ -112,6 +117,8 @@ class CGlassLayerSurface {
     // Track last position/size to detect movement and expand damage
     Vector2D     m_lastPosition;
     Vector2D     m_lastSize;
+    CBox         m_lastRawBox;
+    CBox         m_lastTransformBox;
 
     // Scene generation at last blur — skip re-sampling when only the layer
     // surface content changed (e.g. clock tick) but the background didn't.

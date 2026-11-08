@@ -8,7 +8,7 @@ CGlassLayerCompositeElement::CGlassLayerCompositeElement(const SGlassLayerCompos
     : m_data(data) {}
 
 std::vector<UP<IPassElement>> CGlassLayerCompositeElement::draw(Render::CRenderContext& ctx) {
-    if (m_data.layerState && m_data.layerState->getLayerSurface())
+    if (m_data.layerState)
         m_data.layerState->compositeAndRestore(ctx, ctx.m_data.pMonitor.lock(), m_data.alpha, m_data.maskSource);
 
     return {};
@@ -18,14 +18,18 @@ std::optional<CBox> CGlassLayerCompositeElement::boundingBox(Render::CRenderCont
     if (!m_data.layerState)
         return std::nullopt;
 
-    auto layerSurface = m_data.layerState->getLayerSurface();
-    if (!layerSurface)
-        return std::nullopt;
-
-    // Same helper as CGlassLayerPassElement::boundingBox(), so the pre- and
-    // post-surface elements never disagree about the layer's box.
     const auto monitor = ctx.m_data.pMonitor.lock();
-    return LayerGeometry::computePaddedLogicalLayerBox(layerSurface, monitor, GlassRenderer::SAMPLE_PADDING_PX);
+    auto layerSurface = m_data.layerState->getLayerSurface();
+    if (layerSurface) {
+        auto box = LayerGeometry::computePaddedLogicalLayerBox(layerSurface, monitor, GlassRenderer::SAMPLE_PADDING_PX);
+        if (box)
+            return box;
+    }
+
+    if (m_data.layerState->getLastRawBox().w > 0.0 && m_data.layerState->getLastRawBox().h > 0.0)
+        return LayerGeometry::computePaddedLogicalLayerBox(m_data.layerState->getLastRawBox(), monitor, GlassRenderer::SAMPLE_PADDING_PX);
+
+    return std::nullopt;
 }
 
 bool CGlassLayerCompositeElement::needsLiveBlur(Render::CRenderContext&) {
